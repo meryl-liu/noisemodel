@@ -32,7 +32,7 @@ prob = ODEProblem(odesys,u0,tspan,p;jac=true,sparse=true)
 ssprob = SteadyStateProblem(prob)
 ss_sol = round.(solve(ssprob,SSRootfind()))
 
-## solve JumpProblem
+# solve JumpProblem
 tspan2 = (0.,200.)
 dprob2 = DiscreteProblem(coreMDL, ss_sol, tspan2, p);
 jprob2 = JumpProblem(coreMDL, dprob2, Direct());
@@ -44,4 +44,4 @@ sim2 = solve(ensemble_prob2,SSAStepper(),EnsembleThreads(),trajectories=16)
 
 
 plot(sim2, vars=(0,2), inealpha=0.4)
-
+ 
