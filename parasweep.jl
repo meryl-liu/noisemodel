@@ -2,6 +2,7 @@
 using Catalyst, DifferentialEquations, Plots, DataFrames, GLM, Statistics, Distributions, CSV, GraphViz
 using DifferentialEquations.EnsembleAnalysis
 
+
 ## simple reaction network model
 coreMDL = @reaction_network begin
     (ρₘ,dₘ), ∅ <--> mRNA          #transcription and degradation of mRNA
@@ -10,63 +11,45 @@ coreMDL = @reaction_network begin
 end ρₘ dₘ kₚ dₚ
 ##
 
+
 ## extend to sequestration model
 sqstMDL = @reaction_network begin
     (ρₘ,dₘ), ∅ <--> mRNA                   #transcription and degradation of mRNA
     (ρₛ, dₛ), ∅ <--> sRNA;                  #transcription and degradation of sRNA
     (kₛₘ, rₛₘ), mRNA + sRNA <--> smRNA      #formation of sRNA-mRNA complex
+    dₖₘ, smRNA --> sRNA                     #catalytic degradation of mRNA by sRNA-mRNA complex
     kₚ, mRNA --> mRNA + protein             #translation of mRNA to protein
     dₚ, protein --> ∅                       #protein degradation
-end ρₘ dₘ ρₛ dₛ kₛₘ rₛₘ kₚ dₚ
+end ρₘ dₘ ρₛ dₛ kₛₘ rₛₘ dₖₘ kₚ dₚ
 #g = complexgraph(sqstMDL)
 ##
 
+
 vec1 = 0.01 : 0.01 : 0.1
 vec2 = 0.2 : 0.1 : 1.0
-vec3 = 2.0 : 1.0 : 10.0
+vec3 = 1.1 : 0.1 : 2.4
 logRange = [vec1 ; vec2; vec3] # create a logscale range for parasweep across diff orders of magnitude
 
+
 # chemical species index: 1 - mRNA, 2 - sRNA, 3 - smRNA, 4 - protein 
-function singleSweep(reactionNetwork, u0, tspan, p0, pRange, trajectNum, chemSpecIndex)
-    p0_copy = copy(p0) # store a copy of initial parameter vector for each iteration
+function singleSweep(reactionNetwork, u0, tspan, p0, pRange, trajectNum, paraIndex, chemSpecIndex)
+    
     columnNames = [string.(reactionparams(reactionNetwork)) ; ["mean", "variance", "fano_factor", "tspan", "trajectories", "stationary"]]
     df = DataFrame([[] for _ = columnNames] , columnNames) # construct dataframe to hold all parameter values and statistics
     
-    for j in 1 : length(string.(reactionparams(reactionNetwork))) #perform a sweep on each parameter in the network
-        p0 = copy(p0_copy)
-        println("Sweeping "*string.(reactionparams(reactionNetwork))[j]*"...")
-        for i in pRange # for loop to iterate over parameter values
+    for i in pRange # for loop to iterate over parameter values
            
-            p0[j] = i; # change parameter that is currently being swept over
+        p0[paraIndex] = i; # change parameter that is currently being swept over
 
-            # Run Simulation
-            @named odeSys = convert(ODESystem,reactionNetwork); # create ODE Problem
-            prob = ODEProblem(odeSys,u0,tspan,p0;jac=true,sparse=true);
-            ssprob = SteadyStateProblem(prob); # convert to Steady State Problem
-            ss_sol = round.(solve(ssprob, SSRootfind())); # store steady state solutions
-            dprob = DiscreteProblem(reactionNetwork, ss_sol, tspan, p0); # create stochastic discrete and jump problems (gillespie) with tspan input
-            jprob = JumpProblem(reactionNetwork, dprob, Direct());
-
-            rand_u0 = zeros(length(ss_sol))
-            for a in 1 : length(ss_sol)
-                rand_u0[a] = rand(Poisson(ss_sol[a]))
-            end
-
-            function prob_func(prob,i,repeat)
-                @. prob.prob.u0 = copy(rand_u0); # draw initial conditions for discrete prob from poisson dist 
-                prob
-            end
-
-            ensemble_prob = EnsembleProblem(jprob, prob_func=prob_func); # solve using ensemble problem 
-            simulation = solve(ensemble_prob, SSAStepper(), EnsembleThreads(), trajectories=trajectNum);
-            #display(plot(simulation, linealpha = 0.5, linewidth = 1))
-
-            # check for stationary distribution, store results in dataframes
-            push!(df, stationaryDist(simulation, chemSpecIndex, tspan, p0, trajectNum));
-        end
+        # Run Simulation
+        simulation = runSim(reactionNetwork, u0, tspan, p0, trajectNum)
         
-        
+        #display(plot(simulation, linealpha = 0.5, linewidth = 1))
+
+        # check for stationary distribution, store results in dataframes
+        push!(df, stationaryDist(simulation, chemSpecIndex, tspan, p0, trajectNum));
     end
+    
     #print(df)
     return df;
 end
@@ -127,8 +110,55 @@ function stationaryDist(simulation, chemSpecIndex, tspan, pValues, trajectNum)
     return [pValues ;[mean_stat, var_stat, var_stat/mean_stat, ts[end], trajectNum, stationary]]
 end
 
+function generateFig(unregMDL, sequestMDL, p0_1, p0_2, paraIndex1, paraIndex2, paraNonsweepValues, tspan, trajectNum)
+    # Run simulation with unregulated model
+    unregSim = runSim(unregMDL, [0., 0.,], tspan, p0_1, trajectNum)
+    unregResults = stationaryDist(unregSim, 2, tspan, p0_1, trajectNum)
+    ff_mean_p0 = [unregResults[5], unregResults[7]]; # mean and fano-factor, in that order, in a vector
+    hline([ff_mean_p0[2]],labels="Poisson Noise", xaxis=:log)
+    #plot horizontal line showing a fano factor of 1 in the sequestration model
+    for i in paraNonsweepValues
+        p0_2[paraIndex1] = i
+        df = singleSweep(sequestMDL, [0., 0., 0., 0.], tspan, p0_2, logRange, trajectNum, paraIndex2, 4)
+        label = string.(reactionparams(sequestMDL))[paraIndex2] * "=" * string.(i)
+        plot!(ff_mean_p0[1] ./ df[:, :mean], ff_mean_p0[2] ./ df[:, :fano_factor], labels=label, lw = 2, xaxis=:log)
+    end
+    display(plot!(bg=:white, xaxis=:log);)
+    #plot deterministic solution
+end
 
-##
+function runSim(network, u0, tspan, p0, trajectNum)
+    # Run Simulation
+    @named odeSys = convert(ODESystem, network); # create ODE Problem
+    prob = ODEProblem(odeSys,u0,tspan,p0;jac=true,sparse=true);
+    ssprob = SteadyStateProblem(prob); # convert to Steady State Problem
+    ss_sol = round.(solve(ssprob, SSRootfind())); # store steady state solutions
+    dprob = DiscreteProblem(network, ss_sol, tspan, p0); # create stochastic discrete and jump problems (gillespie) with tspan input
+    jprob = JumpProblem(network, dprob, Direct());
+
+    rand_u0 = zeros(length(ss_sol))
+    for a in 1 : length(ss_sol)
+        rand_u0[a] = rand(Poisson(ss_sol[a]))
+    end
+
+    function prob_func(prob,i,repeat)
+        @. prob.prob.u0 = copy(rand_u0); # draw initial conditions for discrete prob from poisson dist 
+        prob
+    end
+
+    ensemble_prob = EnsembleProblem(jprob, prob_func=prob_func); # solve using ensemble problem 
+    simulation = solve(ensemble_prob, SSAStepper(), EnsembleThreads(), trajectories=trajectNum);
+
+    return simulation
+end
+
+generateFig(coreMDL, sqstMDL, [1.0, 0.1, 1.0, 0.01], [1.0, 0.1, 1.0, 0.1, 1.0, 0.01, 0, 1.0, 0.01], 7, 3, [0, 1e-5, 1e-4, 1e-3, 1e-2], (0., 1000.), 72)
+
+
+
+
+
+#=
 # perform a parameter sweep on all parameters in sequestration MDL
 df = singleSweep(sqstMDL, [0.,0., 0., 0.], (0.,750.), [1.0, 0.1, 1.0, 0.1, 1.0, 0.01, 1.0, 0.01], logRange, 36, 4)
 CSV.write("//Users//merylliu//Desktop//SURP 2022//noiseModel//"*"parasweep_sqst_protein.csv", df)
@@ -160,4 +190,4 @@ plot(df_2[29:56, :dₘ], df_2[29:56, :fano_factor], seriestype = :scatter, title
 dₘ_variable = 0 : 0.01 : 10.0
 display(plot!(dₘ_variable, 1 .+ (1.0 ./ dₘ_variable), labels="Theoretical"))
 
-
+=#
