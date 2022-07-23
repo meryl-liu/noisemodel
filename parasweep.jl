@@ -27,7 +27,7 @@ end ρₘ dₘ ρₛ dₛ kₛₘ rₛₘ dₖₘ kₚ dₚ
 
 vec1 = 0.01 : 0.01 : 0.1
 vec2 = 0.2 : 0.1 : 1.0
-vec3 = 1.1 : 0.1 : 2.4
+vec3 = 2.0 : 1.0 : 10.0
 logRange = [vec1 ; vec2; vec3] # create a logscale range for parasweep across diff orders of magnitude
 
 
@@ -44,8 +44,8 @@ function singleSweep(reactionNetwork, u0, tspan, p0, pRange, trajectNum, paraInd
         # Run Simulation
         simulation = runSim(reactionNetwork, u0, tspan, p0, trajectNum)
         
-        #display(plot(simulation, linealpha = 0.5, linewidth = 1))
-
+        #display(plot(simulation, linealpha = 1, linewidth = 1))
+        #break
         # check for stationary distribution, store results in dataframes
         push!(df, stationaryDist(simulation, chemSpecIndex, tspan, p0, trajectNum));
     end
@@ -110,7 +110,12 @@ function stationaryDist(simulation, chemSpecIndex, tspan, pValues, trajectNum)
     return [pValues ;[mean_stat, var_stat, var_stat/mean_stat, ts[end], trajectNum, stationary]]
 end
 
-function generateFig(unregMDL, sequestMDL, p0_1, p0_2, paraIndex1, paraIndex2, paraNonsweepValues, tspan, trajectNum)
+function generateFig(unregMDL, sequestMDL, p0_1, p0_2, para1, para2, paraNonsweepValues, tspan, trajectNum)
+    # find index of parameter strings passed into function
+    paraIndex1 = findfirst(==(para1), string.(reactionparams(sequestMDL)))
+    paraIndex2 = findfirst(==(para2), string.(reactionparams(sequestMDL)))
+
+
     # Run simulation with unregulated model
     unregSim = runSim(unregMDL, [0., 0.,], tspan, p0_1, trajectNum)
     unregResults = stationaryDist(unregSim, 2, tspan, p0_1, trajectNum)
@@ -120,8 +125,8 @@ function generateFig(unregMDL, sequestMDL, p0_1, p0_2, paraIndex1, paraIndex2, p
     for i in paraNonsweepValues
         p0_2[paraIndex1] = i
         df = singleSweep(sequestMDL, [0., 0., 0., 0.], tspan, p0_2, logRange, trajectNum, paraIndex2, 4)
-        label = string.(reactionparams(sequestMDL))[paraIndex2] * "=" * string.(i)
-        plot!(ff_mean_p0[1] ./ df[:, :mean], ff_mean_p0[2] ./ df[:, :fano_factor], labels=label, lw = 2, xaxis=:log)
+        label = para1 * "=" * string.(i)
+        plot!(ff_mean_p0[1] ./ df[:, :mean], ff_mean_p0[2] ./ df[:, :fano_factor], labels=label, lw = 2, xaxis=:log, legend= :outertopleft)
     end
     display(plot!(bg=:white, xaxis=:log);)
     #plot deterministic solution
@@ -131,6 +136,7 @@ function runSim(network, u0, tspan, p0, trajectNum)
     # Run Simulation
     @named odeSys = convert(ODESystem, network); # create ODE Problem
     prob = ODEProblem(odeSys,u0,tspan,p0;jac=true,sparse=true);
+
     ssprob = SteadyStateProblem(prob); # convert to Steady State Problem
     ss_sol = round.(solve(ssprob, SSRootfind())); # store steady state solutions
     dprob = DiscreteProblem(network, ss_sol, tspan, p0); # create stochastic discrete and jump problems (gillespie) with tspan input
@@ -150,13 +156,42 @@ function runSim(network, u0, tspan, p0, trajectNum)
     simulation = solve(ensemble_prob, SSAStepper(), EnsembleThreads(), trajectories=trajectNum);
 
     return simulation
+    
 end
 
-generateFig(coreMDL, sqstMDL, [1.0, 0.1, 1.0, 0.01], [1.0, 0.1, 1.0, 0.1, 1.0, 0.01, 0, 1.0, 0.01], 7, 3, [0, 1e-5, 1e-4, 1e-3, 1e-2], (0., 1000.), 72)
+
+#generating fig 1: increasing catalytic degradation
+generateFig(coreMDL, sqstMDL, [1.0, 0.1, 1.0, 0.01], [1.0, 0.1, 1.0, 0.1, 1.0, 0.01, 0, 1.0, 0.01], "dₖₘ", "ρₛ", [0, 1e-5, 1e-4, 1e-3, 1e-2], (0., 50.), 6)
+
+# generating fig 2: decreasing the sequestration effect
+#generateFig(coreMDL, sqstMDL, [1.0, 0.1, 1.0, 0.01], [1.0, 0.1, 1.0, 0.1, 1.0, 0.01, 1e-2, 1.0, 0.01], 6, 3, [1e-2, 1e-1, 1e0, 1e1], (0., 1000.), 90)
+# generating fig 3: high sRNA translation, no sequestration, increasing catalytic degradation
+#generateFig(coreMDL, sqstMDL, [1.0, 0.1, 1.0, 0.01], [1.0, 0.1, 1.0, 0.1, 1.0, 100, 0, 1.0, 0.01], 7, 3, [0.01, 0.05, 0.1, 1], (0., 1000.), 90)
 
 
 
+#=
+# code for generating protein and mRNA level figures
+sqstSim = runSim(sqstMDL, [0., 0., 0., 0.], (0., 50.),[1.0, 0.1, 1.0, 0.1, 1.0, 0.01, 0, 1.0, 0.01], 1)
+coreSim = runSim(coreMDL, [0., 0.], (0., 50.),[1.0, 0.1, 1.0, 0.01], 1)
 
+ts = 0 : 1 : 25;
+m_series,v_series = timeseries_point_meanvar(sqstSim,ts) 
+m_series1,v_series1 = timeseries_point_meanvar(coreSim,ts) 
+l = @layout [a ; b]
+p1 = plot(coreSim, vars=(0, 2), labels="kₛₘ=0", linewidth=2.0, legend = :outertopleft)
+p1 = plot!(sqstSim, vars=(0, 4),labels="kₛₘ = 1.0",linewidth=2.0, legend = :outertopleft)
+p2 = plot(coreSim, vars=(0, 1), labels="kₛₘ=0",linewidth=2.0, legend = :outertopleft)
+p2 = plot!(sqstSim, vars=(0, 1), labels="kₛₘ = 1.0",linewidth=2.0, legend = :outertopleft)
+
+plot(p1, p2, layout = l)
+
+plot(ts, m_series1[2, :], labels="kₛₘ=0", linewidth=2.5)
+display(plot!(ts, m_series[4,:], labels="kₛₘ = 1.0",linewidth=2.5))
+
+plot(ts, m_series1[1, :], labels="kₛₘ=0",linewidth=2.5)
+display(plot!(ts, m_series[1,:], labels="kₛₘ = 1.0",linewidth=2.5))
+=#
 
 #=
 # perform a parameter sweep on all parameters in sequestration MDL
