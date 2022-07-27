@@ -128,7 +128,8 @@ function generateFig(unregMDL, sequestMDL, p0_1, p0_2, para1, para2, paraNonswee
         label = para1 * "=" * string.(i)
         plot!(ff_mean_p0[1] ./ df[:, :mean], ff_mean_p0[2] ./ df[:, :fano_factor], labels=label, lw = 2, xaxis=:log, legend= :outertopleft)
     end
-    display(plot!(bg=:white, xaxis=:log);)
+    plot!(bg=:white, xaxis=:log);
+    png("/home/ml2244/plot1") # save file to local disk
     #plot deterministic solution
 end
 
@@ -161,7 +162,9 @@ end
 
 
 #generating fig 1: increasing catalytic degradation
-generateFig(coreMDL, sqstMDL, [1.0, 0.1, 1.0, 0.01], [1.0, 0.1, 1.0, 0.1, 1.0, 0.01, 0, 1.0, 0.01], "dₖₘ", "ρₛ", [0, 1e-5, 1e-4, 1e-3, 1e-2], (0., 50.), 6)
+generateFig(coreMDL, sqstMDL, [1.0, 0.1, 1.0, 0.01], [1.0, 0.1, 1.0, 0.1, 1.0, 0.01, 0, 1.0, 0.01], "dₖₘ", "ρₛ", [0, 1e-5, 1e-4, 1e-3, 1e-2], (0., 100.), 6)
+
+
 
 # generating fig 2: decreasing the sequestration effect
 #generateFig(coreMDL, sqstMDL, [1.0, 0.1, 1.0, 0.01], [1.0, 0.1, 1.0, 0.1, 1.0, 0.01, 1e-2, 1.0, 0.01], 6, 3, [1e-2, 1e-1, 1e0, 1e1], (0., 1000.), 90)
