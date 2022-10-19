@@ -11,7 +11,6 @@ coreMDL = @reaction_network begin
 end ρₘ dₘ kₚ dₚ
 ##
 
-
 ## extend to sequestration model
 sqstMDL = @reaction_network begin
     (ρₘ,dₘ), ∅ <--> mRNA                   #transcription and degradation of mRNA
@@ -19,42 +18,74 @@ sqstMDL = @reaction_network begin
     (kₛₘ, rₛₘ), mRNA + sRNA <--> smRNA      #formation of sRNA-mRNA complex
     dₖₘ, smRNA --> sRNA                     #catalytic degradation of mRNA by sRNA-mRNA complex
     kₚ, mRNA --> mRNA + protein             #translation of mRNA to protein
+    kₜ, smRNA --> smRNA + protein           #residual translation in sRNA-mRNA complex
     dₚ, protein --> ∅                       #protein degradation
-end ρₘ dₘ ρₛ dₛ kₛₘ rₛₘ dₖₘ kₚ dₚ
+end ρₘ dₘ ρₛ dₛ kₛₘ rₛₘ dₖₘ kₚ kₜ dₚ
 #g = complexgraph(sqstMDL)
 ##
 
+# INCOMPLETE
+# function that generates a logscale in a specified range
+function createLogscale(startVal, endVal)
+    currentVal = startVal
+    inc = 0.0;
+    logScale = [startVal]
+    while(currentVal + inc <= endVal)
+        magnitude = floor(log10(currentVal));
+        while(floor(log10(currentVal)) < magnitude + 1)
+            inc = (10 ^ magnitude)
+            print(inc)
+            currentVal = currentVal + inc;
+            println(currentVal)
+            logScale = [logScale; currentVal]
+        end
+    end 
+    logScale = [logScale; endVal]
+    
+    return logScale
 
+end
+
+createLogscale(0.01, 10.0)
 vec1 = 0.01 : 0.01 : 0.1
 vec2 = 0.2 : 0.1 : 1.0
-vec3 = 2.0 : 1.0 : 10.0
+vec3 = 1.1 : 0.1 : 2.4
 logRange = [vec1 ; vec2; vec3] # create a logscale range for parasweep across diff orders of magnitude
 
 
-# chemical species index: 1 - mRNA, 2 - sRNA, 3 - smRNA, 4 - protein 
-function singleSweep(reactionNetwork, u0, tspan, p0, pRange, trajectNum, paraIndex, chemSpecIndex)
-    
-    columnNames = [string.(reactionparams(reactionNetwork)) ; ["mean", "variance", "fano_factor", "tspan", "trajectories", "stationary"]]
-    df = DataFrame([[] for _ = columnNames] , columnNames) # construct dataframe to hold all parameter values and statistics
-    
-    for i in pRange # for loop to iterate over parameter values
-           
-        p0[paraIndex] = i; # change parameter that is currently being swept over
+# runSim takes in the reaction network, initial concentrations, time span, parameter values, and trajectories,
+# and returns a simulation run with a single set of parameter values
+function runSim(network, u0, tspan, p0, trajectNum)
+    # Run Simulation
+    @named odeSys = convert(ODESystem, network); # create ODE Problem
+    prob = ODEProblem(odeSys,u0,tspan,p0;jac=true,sparse=true);
 
-        # Run Simulation
-        simulation = runSim(reactionNetwork, u0, tspan, p0, trajectNum)
-        
-        #display(plot(simulation, linealpha = 1, linewidth = 1))
-        #break
-        # check for stationary distribution, store results in dataframes
-        push!(df, stationaryDist(simulation, chemSpecIndex, tspan, p0, trajectNum));
+    ssprob = SteadyStateProblem(prob); # convert to Steady State Problem
+    ss_sol = round.(solve(ssprob, SSRootfind())); # store steady state solutions
+    dprob = DiscreteProblem(network, ss_sol, tspan, p0); # create stochastic discrete and jump problems (gillespie) with tspan input
+    #print(dprob) 
+    jprob = JumpProblem(network, dprob, Direct()); # <- Error is being thrown here: ERROR: MethodError: Cannot `convert` an object of type Sym{Real, Base.ImmutableDict{DataType, Any}} to an object of type WARNING: both Symbolics and ModelingToolkit export "degree"; uses of it in module Catalyst must be qualified
+
+    rand_u0 = zeros(length(ss_sol))
+    for a in 1 : length(ss_sol)
+        rand_u0[a] = rand(Poisson(ss_sol[a]))
     end
+
+    function prob_func(prob,i,repeat)
+        @. prob.prob.u0 = copy(rand_u0); # draw initial conditions for discrete prob from poisson dist 
+        prob
+    end
+
+    ensemble_prob = EnsembleProblem(jprob, prob_func=prob_func); # solve using ensemble problem 
+    simulation = solve(ensemble_prob, SSAStepper(), EnsembleThreads(), trajectories=trajectNum);
+
+    return simulation
     
-    #print(df)
-    return df;
 end
 
 # chemSpecIndex corresponds to chemical species of interest: 1 - mRNA, 2 - sRNA, 3 - smRNA, 4 - protein
+# stationaryDist checks if the distribution is stationary for a simulation,
+# and returns a dataframe row with relevant information
 function stationaryDist(simulation, chemSpecIndex, tspan, pValues, trajectNum)
     ans = ["Yes", "No"];
     ts = tspan[1] : 1 : tspan[end];
@@ -110,7 +141,34 @@ function stationaryDist(simulation, chemSpecIndex, tspan, pValues, trajectNum)
     return [pValues ;[mean_stat, var_stat, var_stat/mean_stat, ts[end], trajectNum, stationary]]
 end
 
-function generateFig(unregMDL, sequestMDL, p0_1, p0_2, para1, para2, paraNonsweepValues, tspan, trajectNum)
+
+# chemical species index: 1 - mRNA, 2 - sRNA, 3 - smRNA, 4 - protein 
+# singleSweep takes a reaction network and performs a parameter sweep through a given parameter:
+# returns a dataframe
+function singleSweep(reactionNetwork, u0, tspan, p0, pRange, trajectNum, paraIndex, chemSpecIndex)
+    
+    columnNames = [string.(reactionparams(reactionNetwork)) ; ["mean", "variance", "fano_factor", "tspan", "trajectories", "stationary"]]
+    df = DataFrame([[] for _ = columnNames] , columnNames) # construct dataframe to hold all parameter values and statistics
+    
+    for i in pRange # for loop to iterate over parameter values
+           
+        p0[paraIndex] = i; # change parameter that is currently being swept over
+
+        # Run Simulation
+        simulation = runSim(reactionNetwork, u0, tspan, p0, trajectNum)
+        
+        #display(plot(simulation, linealpha = 1, linewidth = 1))
+        #break
+        # check for stationary distribution, store results in dataframes
+        push!(df, stationaryDist(simulation, chemSpecIndex, tspan, p0, trajectNum));
+    end
+    
+    #print(df)
+    return df;
+end
+
+# generateFig generates figures of gene repression vs. noise repression for different parameter values
+function generateFig(unregMDL, sequestMDL, p0_1, p0_2, para1, para2, paraNonsweepValues, tspan, trajectNum, plotNum)
     # find index of parameter strings passed into function
     paraIndex1 = findfirst(==(para1), string.(reactionparams(sequestMDL)))
     paraIndex2 = findfirst(==(para2), string.(reactionparams(sequestMDL)))
@@ -129,47 +187,60 @@ function generateFig(unregMDL, sequestMDL, p0_1, p0_2, para1, para2, paraNonswee
         plot!(ff_mean_p0[1] ./ df[:, :mean], ff_mean_p0[2] ./ df[:, :fano_factor], labels=label, lw = 2, xaxis=:log, legend= :outertopleft)
     end
     plot!(bg=:white, xaxis=:log);
-    png("/home/ml2244/plot1") # save file to local disk
+    png("/home/ml2244/plot"*plotNum) # save file to local disk
     #plot deterministic solution
 end
 
-function runSim(network, u0, tspan, p0, trajectNum)
-    # Run Simulation
-    @named odeSys = convert(ODESystem, network); # create ODE Problem
-    prob = ODEProblem(odeSys,u0,tspan,p0;jac=true,sparse=true);
 
-    ssprob = SteadyStateProblem(prob); # convert to Steady State Problem
-    ss_sol = round.(solve(ssprob, SSRootfind())); # store steady state solutions
-    dprob = DiscreteProblem(network, ss_sol, tspan, p0); # create stochastic discrete and jump problems (gillespie) with tspan input
-    jprob = JumpProblem(network, dprob, Direct());
 
-    rand_u0 = zeros(length(ss_sol))
-    for a in 1 : length(ss_sol)
-        rand_u0[a] = rand(Poisson(ss_sol[a]))
-    end
 
-    function prob_func(prob,i,repeat)
-        @. prob.prob.u0 = copy(rand_u0); # draw initial conditions for discrete prob from poisson dist 
-        prob
-    end
 
-    ensemble_prob = EnsembleProblem(jprob, prob_func=prob_func); # solve using ensemble problem 
-    simulation = solve(ensemble_prob, SSAStepper(), EnsembleThreads(), trajectories=trajectNum);
 
-    return simulation
-    
+# Ignore all below this (test code)
+
+#runSim(sqstMDL, [0., 0., 0., 0.], (0., 1000.), [1.0, 0.1, 1.0, 0.1, 1.0, 0.01, 0, 1.0, 0.01], 15);
+#plot against time
+# create plots with different trajectories with time dependence show mean field solution looks about correct
+# stest with core model and then simplest sequestration model and see when stops working
+# copy into jupyter notebook and execute cell by cell and figure out where error is coming from - execute function body step by step
+#=
+trajectvec = [15, 150, 600, 1200, 1800];
+means = zeros(8);
+counter =1;
+#run simulations with increasing number of trajectories
+for i in trajectvec
+    global counter;
+    simulation = runSim(MDL, [0., 0.], (0., 1000.),  [1.0, 0.1, 1.0, 0.01], i);
+    data = stationaryDist(simulation, 2, (0., 1000.), [1.0, 0.1, 1.0, 0.01], i)
+    means[counter] = data[5];
+    counter = counter +1;
 end
+
+plot(trajectvec, means, lw = 2);
+#png("/home/ml2244/plotTrajectNums")
+=#
+
+
+# Run simulation with unregulated model
+#unregSim = runSim(unregMDL, [0., 0.,], tspan, p0_1, trajectNum)
+#unregResults = stationaryDist(unregSim, 2, tspan, p0_1, trajectNum)
+#ff_mean_p0 = [unregResults[5], unregResults[7]]; # mean and fano-factor, in that order, in a vector
+#hline([ff_mean_p0[2]],labels="Poisson Noise", xaxis=:log)
+
 
 
 #generating fig 1: increasing catalytic degradation
-generateFig(coreMDL, sqstMDL, [1.0, 0.1, 1.0, 0.01], [1.0, 0.1, 1.0, 0.1, 1.0, 0.01, 0, 1.0, 0.01], "dₖₘ", "ρₛ", [0, 1e-5, 1e-4, 1e-3, 1e-2], (0., 100.), 6)
-
+#generateFig(coreMDL, sqstMDL, [1.0, 0.1, 1.0, 0.01], [1.0, 0.1, 1.0, 0.1, 1.0, 0.01, 0, 1.0, 0.01], "dₖₘ", "ρₛ", [0, 1e-5, 1e-4, 1e-3, 1e-2], (0., 100.), 1800, "1")
 
 
 # generating fig 2: decreasing the sequestration effect
-#generateFig(coreMDL, sqstMDL, [1.0, 0.1, 1.0, 0.01], [1.0, 0.1, 1.0, 0.1, 1.0, 0.01, 1e-2, 1.0, 0.01], 6, 3, [1e-2, 1e-1, 1e0, 1e1], (0., 1000.), 90)
+#3generateFig(coreMDL, sqstMDL, [1.0, 0.1, 1.0, 0.01], [1.0, 0.1, 1.0, 0.1, 1.0, 0.01, 1e-2, 1.0, 0.01], "rₛₘ", "ρₛ", [1e-2, 1e-1, 1e0, 1e1], (0., 1000.), 1800, "2")
+
+
+#vec3 = 2.0 : 1.0 : 30.0
+#logRange = [vec1 ; vec2; vec3] # create a logscale range for parasweep across diff orders of magnitude
 # generating fig 3: high sRNA translation, no sequestration, increasing catalytic degradation
-#generateFig(coreMDL, sqstMDL, [1.0, 0.1, 1.0, 0.01], [1.0, 0.1, 1.0, 0.1, 1.0, 100, 0, 1.0, 0.01], 7, 3, [0.01, 0.05, 0.1, 1], (0., 1000.), 90)
+#generateFig(coreMDL, sqstMDL, [1.0, 0.1, 1.0, 0.01], [1.0, 0.1, 1.0, 0.1, 1.0, 100, 0, 1.0, 0.01], "dₖₘ", "ρₛ", [0.01, 0.05, 0.1, 1], (0., 1000.), 1800, "3")
 
 
 
